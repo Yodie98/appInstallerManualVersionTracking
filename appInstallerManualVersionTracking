@@ -1,0 +1,194 @@
+#!/bin/bash
+
+################################################################
+# SCRIPT CONFIGURATION
+################################################################
+
+# Declare app name as shown in finder and dont add .app to the end)
+applicationName=""
+# Declare the latest version hosted in CDN
+latestVersion=""
+# Declare the Mosyle CDN variable/CDN URL of the package file
+cdn=""
+# Declare the SHA-256 hash of the package file
+sha256=""
+
+################################################################
+# DIRECTORIES
+################################################################
+
+# Declare path of app
+appFilePath="/Applications/$applicationName.app"
+# Declare tmp folder
+temporaryFolderPath="/tmp"
+# Declare name of the downloaded installer
+temporaryFileName="/${applicationName}-$(date +%s).pkg"
+# Declare the directory for the parent log folder
+logDirectory="/private/var/log/.apaIT"
+# Declare the name of the log file
+logFileName="${applicationName}_${latestVersion}_updater.log"
+# Parent folder of version
+installedVersionPath="/Users/Shared/.apaIT/${applicationName}Version"
+# Version
+installedVersion="/Users/Shared/.apaIT/${applicationName}Version/$latestVersion"
+
+
+################################################################
+# COMMANDS
+################################################################
+
+# Curl command used throught the script. https://ss64.com/osx/curl.html
+callCurl="$( curl -s -S -L -k "$cdn" -o "${temporaryFolderPath}""${temporaryFileName}" ) 2>&1"
+# Means by which SHA256 is determined. https://ss64.com/osx/shasum.html
+shaCheck="$( shasum -a 256 "${temporaryFolderPath}""${temporaryFileName}" | awk '{print $1}' )"
+
+################################################################
+# FUNCTIONS
+################################################################
+
+# Array of files to be deleted/uninstalled. Use this application to find residual files: https://freemacsoft.net/appcleaner/
+filesToDelete=(
+    "/Applications/$applicationName"
+)
+
+# Function to iniciate the log
+logStart() {
+    local datestamp
+    datestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "Session started @ $datestamp" | tee -a "$logDirectory/$logFileName"
+}
+
+# Function to update the log
+logMessage() {
+    local timestamp
+    timestamp=$(date +"%H:%M:%S")
+    echo "[$timestamp] $1" | tee -a "$logDirectory/$logFileName"
+}
+
+# Function to handle end of log
+logEnd() {
+    echo "----------" >> "$logDirectory/$logFileName"
+}
+
+# Function to handle script errors
+handleError() {
+    local error_message=$1
+    logMessage "ERROR: $error_message"
+    logEnd
+    exit 1
+}
+
+# Function to handle successful completion of the script
+handleSuccess() {
+    logMessage "Installation of $applicationName v$latestVersion complete."
+    logEnd
+    exit 0
+}
+
+# Function to delete files, given an array of paths
+deleteFiles() {
+    local timestamp
+    timestamp=$(date +"%H:%M:%S")
+    local filesToDelete=("$@")
+    for file in "${filesToDelete[@]}"; do
+        if [[ -e "$file" ]]; then
+            rm -rf "$file"
+            echo "[$timestamp] Deleted file: $file" >> "$logDirectory/$logFileName"
+        fi
+    done
+}
+
+################################################################
+# SCRIPT START
+################################################################
+
+# Check if the log directory exists or create it
+[[ -d "$logDirectory" ]] || mkdir -p "$logDirectory"
+
+[[ -d "$installedVersionPath" ]] || mkdir -p "$installedVersionPath"
+
+logStart
+
+if [[ -e "$appFilePath" ]]; then
+    
+    if [[ $( ls "$installedVersionPath" ) = "$latestVersion" ]]; then
+        logMessage "$applicationName $( ls "$installedVersionPath" ) is installed. This device is up to date."
+        logEnd
+        exit 0
+    elif [[ $( ls "$installedVersionPath" ) = "" ]]; then
+        logMessage "$applicationName appears to be installed but is malformed/corrupted. The \$installedVersion variable can not be found. Reinstallation is needed."
+        logMessage "Beginning download..."
+
+        if curl_output="$callCurl 2>&1"; then
+            logMessage "Download complete. Checking SHA-256..."
+            
+            if [[ "$sha256" == "$shaCheck" ]]; then
+                logMessage "SHA-256 is valid. Uninstalling old version $(ls "$installedVersionPath")"
+                deleteFiles "${filesToDelete[@]}"
+                logMessage "Uninstallation successful. Beginning install of new version ($latestVersion)."
+                installer -pkg "${temporaryFolderPath}${temporaryFileName}" -target / | while read -r line; do logMessage "$line" ; done
+                rm -f "$installedVersionPath"/*
+                touch "$installedVersion"
+                handleSuccess
+            else
+                logMessage "ERROR: SHA-256 does not match. Exiting..."
+                logMessage "Expected SHA-256: $sha256"
+                logMessage "Downloaded SHA-256: $($shaCheck | awk '{print $1}')"
+                handleError "SHA-256 verification failed."
+            fi
+        else
+            handleError "Curl command failed. > $curl_output"
+        fi
+    elif [[ $( ls "$installedVersionPath" ) < "$latestVersion" ]]; then
+        logMessage "$applicationName is installed but NOT up to date. Installed version: $( ls "$installedVersionPath" ), CDN Version: $latestVersion."
+        logMessage "Beginning download..."
+        
+        if curl_output="$callCurl 2>&1"; then
+            logMessage "Download complete. Checking SHA-256..."
+            
+            if [[ "$sha256" == "$shaCheck" ]]; then
+                logMessage "SHA-256 is valid. Uninstalling old version $(ls "$installedVersionPath")"
+                deleteFiles "${filesToDelete[@]}"
+                logMessage "Uninstallation successful. Beginning install of new version ($latestVersion)."
+                installer -pkg "${temporaryFolderPath}${temporaryFileName}" -target / | while read -r line; do logMessage "$line" ; done
+                rm -f "$installedVersionPath"/*
+                touch "$installedVersion"
+                handleSuccess
+            else
+                logMessage "Expected SHA-256: $sha256"
+                logMessage "Downloaded SHA-256: $($shaCheck | awk '{print $1}')"
+                handleError "SHA-256 verification failed."
+            fi
+        else
+            handleError "Curl command failed. > $curl_output"
+        fi
+    elif [[ $( ls "$installedVersionPath" ) > "$latestVersion" ]]; then
+        logMessage "WEIRD!!! Installed version $( ls "$installedVersionPath" ) is newer than CDN version (v$latestVersion)."
+        logMessage "Good to go!"
+        exit 0
+    else
+        handleError "Unable to determine installed version: ($installedVersion)"
+    fi
+else
+    logMessage "$applicationName is not installed."
+    logMessage "Beginning download..."
+
+    if curl_output="$callCurl 2>&1"; then
+        logMessage "Download complete. Checking SHA-256..."
+        
+        if [[ "$sha256" == "$shaCheck" ]]; then
+            logMessage "SHA-256 is valid. Beginning install."
+            installer -pkg "${temporaryFolderPath}${temporaryFileName}" -target / | while read -r line; do logMessage "$line" ; done
+            rm -f "$installedVersionPath"/*
+            touch "$installedVersion"
+            handleSuccess
+        else
+            logMessage "ERROR: SHA-256 does not match. Exiting..."
+            logMessage "Expected SHA-256: $sha256"
+            logMessage "Downloaded SHA-256: $($shaCheck | awk '{print $1}')"
+            handleError "SHA-256 verification failed."
+        fi
+    else
+        handleError "Curl command failed. > $curl_output"
+    fi
+fi
